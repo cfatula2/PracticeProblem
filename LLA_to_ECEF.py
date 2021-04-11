@@ -1,4 +1,6 @@
+import argparse
 import math
+import os
 import sys
 
 from bisect import bisect_left
@@ -25,6 +27,18 @@ def computeVelocity(oldTime, newTime, oldPosition, newPosition):
     if oldTime >= 0 and newTime >= oldTime:
         velocity = (newPosition - oldPosition)/(newTime - oldTime)
     return velocity
+
+# Compute velocity vector using ECEF x, y, z positions for adjacent 
+# data points
+def computeVelocityVector(previousRow, currentRow):
+    velocityVector = []
+    
+    for coordIndex in range(4,7):
+        vel = computeVelocity(previousRow[0], currentRow[0], \
+            previousRow[coordIndex], currentRow[coordIndex])
+        velocityVector.append(vel)
+    
+    return velocityVector
     
 # Read and parse input file, convert LLA to ECEF x,y,z coordinates,
 # and compute velocities
@@ -33,39 +47,32 @@ def computeVelocity(oldTime, newTime, oldPosition, newPosition):
 # [timestamp, lat, long, alt, x, y, z, Vx, Vy, Vz]
 def performConversion(filePath):
     file = open(filePath, 'r')
-    endOfFile = False
+    
     positionData = []
     timeStamps = []
     index = 0
-    while not endOfFile:
-        line = file.readline()
-        if line:
-            line = line.strip()
-            data = line.split(",")
-            data = [float(x) for x in data]
-            #data = list(np.float_(data))
-            if len(data) == 4:
-                timeStamps.append(data[0])
-                x, y, z = computeECEF(data[1], data[2], data[3]*1000)
-                data.append(x)
-                data.append(y)
-                data.append(z)
-                coordIndex = 4
-                for i in range(0,3):
-                    if index > 0:
-                        vel = computeVelocity(positionData[index-1][0], data[0], \
-                        positionData[index-1][coordIndex], data[coordIndex])
-                        data.append(vel)
-                    else:
-                        data.append(0)
-                    coordIndex+=1
-                positionData.append(data)
-                index+=1
-                # if (index >= 10):
-                    # endOfFile = True
-            # print(data)
-        else:
-            endOfFile = True
+    
+    for line in file:
+        line = line.strip()
+        data = line.split(",")
+        data = [float(x) for x in data]
+        if len(data) == 4:
+            timeStamps.append(data[0])
+            x, y, z = computeECEF(data[1], data[2], data[3]*1000)
+            data.append(x)
+            data.append(y)
+            data.append(z)
+
+            velVec = []
+            if index > 0:
+                velVec = computeVelocityVector(positionData[index-1], data)
+            else:
+                velVec = [0, 0, 0]
+            for vel in velVec:
+                data.append(vel)
+            
+            positionData.append(data)    
+            index+=1
     file.close()
     
     return positionData
@@ -80,12 +87,11 @@ def interpolateVelocity (ts, prevTs, postTs, prevVel, postVel):
 # adjacent timestamps
 def interpolateVelocityVector (ts, rowBefore, rowAfter):
     velVector = []
-    velIndex = 7
-    for i in range(0,3):
+    
+    for velIndex in range(7,10):
         interpVel = interpolateVelocity(ts, rowBefore[0], rowAfter[0], \
-        rowBefore[velIndex], rowAfter[velIndex])
+            rowBefore[velIndex], rowAfter[velIndex])
         velVector.append(interpVel)
-        velIndex+=1
     
     return velVector
 
@@ -95,39 +101,42 @@ def findClosest(ecefData, timestampToFind):
     timestampColumn = [row[0] for row in ecefData]
     position = bisect_left(timestampColumn, timestampToFind)
     
-    if (position == 0): # timestampToFind < first timestamp in data
-        print("Not enough data for interpolation")
-        return 0, 0
-    if (position == len(ecefData)): # timestampToFind > last timestamp in data
+    # If timestampToFind < first timestamp in data OR 
+    # timestampToFind > last timestamp in data, cannot perform 
+    # velocity interpolation
+    if (position == 0 or position == len(ecefData)): 
         print("Not enough data for interpolation")
         return 0, 0
     rowBefore = ecefData[position - 1]
     rowAfter = ecefData[position]
     
-    #print(rowBefore)
-    #print(rowAfter)
-    
     return rowBefore, rowAfter
 
 # Main routine
-def main():
-    if len(sys.argv) > 1:
-        ecefData = performConversion(sys.argv[1])
-        if len(sys.argv) >= 2:
-            argIndex = 2
-            while (argIndex < len(sys.argv)):
-                timestamp = float(sys.argv[argIndex])
-                print(timestamp, end = ": ")
-                before, after = findClosest(ecefData, timestamp)
-                if (before and after):
-                    #print(timestamp, end = ": [")
-                    x, y, z = interpolateVelocityVector(timestamp, before, after)
-                    print("[", end = "")
-                    print(x, end = ", ")
-                    print(y, end = ", ")
-                    print(z, end = "]\n")
-                argIndex+=1
-    #print(interpolateVelocity(7.4, 3, 15, 1, 10))
+def main(filePath, timeStampsToInterpolate):
+    ecefData = performConversion(filePath)
+
+    for ts in timeStampsToInterpolate:
+        before, after = findClosest(ecefData, ts)
+        if (before and after):
+            x, y, z = interpolateVelocityVector(ts, before, after)
+            print("{} : [{}, {}, {}]".format(ts, x, y, z)) 
 
 if __name__ == "__main__":
-    main()
+    desc = "Given an input CSV file with the following - A UNIX timestamp (in seconds \
+        since the UNIX epoch), WGS84 Latitude in degrees, WGS84 Longitude in degrees \
+        \n  WGS84 altitude in kilometers - compute the Earth-centered, \
+        earth-fixed x, y, and z coordinates in meters and velocities in meters/sec in \
+        the x, y, and z planes"
+    parser = argparse.ArgumentParser(description = desc)
+    parser.add_argument('-f', required = True, help = "Input CSV file")
+    parser.add_argument('-t', required = False, help = "Optional timestamp(s) \
+        from which to interpolate velocity vector", nargs='+', type = float)
+    args = parser.parse_args()
+    
+    if not os.path.isfile(args.f):
+        print("File " + args.f + " does not exist")
+        parser.print_help()
+        sys.exit()
+
+    main(args.f, args.t)
